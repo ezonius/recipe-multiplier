@@ -102,12 +102,21 @@ end
 
 ---@param itemName string internal name of the item
 ---@param multiplier number multiplier for scaling the recipe
+local function recipe_is_recycling(itemName)
+    local cats = data.raw.recipe[itemName] and data.raw.recipe[itemName].categories
+    if not cats then return false end
+    for _, c in pairs(cats) do
+        if c == "recycling" then return true end
+    end
+    return false
+end
+
 local function updateRecipeAmounts(itemName, multiplier)
     if not data.raw.recipe[itemName] then
         log("Warning: recipe name '" .. itemName .. "' does not exist.")
         return
     end
-    if data.raw.recipe[itemName].category == "recycling" then
+    if recipe_is_recycling(itemName) then
         ---@diagnostic disable-next-line: cast-local-type
         multiplier = modSettingsRecyclingMultiplier
     end
@@ -244,8 +253,6 @@ if settings.startup["re-enable-name"].value then
 end
 
 if fluidFlowMultiplier > 0 then
-    data.raw["utility-constants"].default.max_fluid_flow = data.raw["utility-constants"].default.max_fluid_flow *
-        fluidFlowMultiplier
     local typesToCheck = { "assembling-machine", "furnace" }
     for _, type in pairs(typesToCheck) do
         for itemName, item in pairs(data.raw[type]) do

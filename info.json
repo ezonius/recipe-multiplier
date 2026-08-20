@@ -3,7 +3,7 @@
 	"version": "1.0.0",
 	"title": "Recipe Multiplier",
 	"author": "ezonius",
-	"factorio_version": "2.0",
+	"factorio_version": "2.1",
 	"dependencies": [
 	"base >= 1.1.80",
 	"(?) elevated-rails",
