@@ -45,7 +45,8 @@ data:extend({
         order = "ah",
         setting_type = "startup",
         default_value =
-        "iron-plate, copper-plate, pipe, pipe-to-ground, iron-gear-wheel, iron-stick, copper-cable, electronic-circuit, advanced-circuit, processing-unit, plastic-bar, sulfur, inserter, transport-belt, rail",
+        "iron-plate, copper-plate, pipe, pipe-to-ground, iron-gear-wheel, iron-stick, copper-cable, " ..
+        "electronic-circuit, advanced-circuit, processing-unit, plastic-bar, sulfur, inserter, transport-belt, rail",
         allow_blank = true
     },
     {
@@ -66,14 +67,14 @@ data:extend({
     {
         type = "bool-setting",
         name = "re-enable-add-recipe",
-        order = "ai",
+        order = "ba",
         setting_type = "startup",
         default_value = false,
     },
     {
         type = "int-setting",
         name = "re-fluid-flow-multiplier",
-        order = "aj",
+        order = "bb",
         setting_type = "startup",
         default_value = 10,
         minimum_value = 1,
