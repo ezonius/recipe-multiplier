@@ -83,6 +83,8 @@ end
 local modSettingsItemTypes = parseSettingString(settings.startup["re-item-types"].value)
 ---@diagnostic disable-next-line: param-type-mismatch
 local modSettingsItemNames = parseSettingString(settings.startup["re-item-names"].value)
+---@diagnostic disable-next-line: param-type-mismatch
+local modSettingsSubGroups = parseSettingString(settings.startup["re-sub-groups"].value)
 
 local function processItemFlags(item)
     if excludedGroups[item.type] then
@@ -111,6 +113,66 @@ local function recipe_is_recycling(itemName)
     return false
 end
 
+--- Cache of item-name → item-prototype lookups (false = not found, since nil can't be stored).
+local itemPrototypeCache = {}
+
+---@param itemName string internal name of the item
+---@return table? itemPrototype the first matching item-ish prototype, or nil when unknown
+local function findItemPrototypeAnywhere(itemName)
+    local cached = itemPrototypeCache[itemName]
+    if cached ~= nil then
+        return cached or nil
+    end
+    local found = nil
+    for typeName in pairs(defines.prototypes["item"]) do
+        local group = data.raw[typeName]
+        if group and group[itemName] then
+            found = group[itemName]
+            break
+        end
+    end
+    itemPrototypeCache[itemName] = found or false
+    return found
+end
+
+---@param itemPrototype table? an item prototype, or nil when it could not be found
+---@return boolean
+local function item_is_non_stackable(itemPrototype)
+    if not itemPrototype then
+        return true
+    end
+    if tableContains(itemPrototype.flags or {}, "not-stackable") then
+        return true
+    end
+    local stackSize = itemPrototype.stack_size
+    return not stackSize or stackSize <= 1
+end
+
+--- The engine rejects item products of non-stackable items (stack_size <= 1 or "not-stackable"
+--- flag) when their max count exceeds 1, e.g. "Recipe item-product X is not stackable but has a
+--- max count of N". Such recipes cannot be batched, so they must be left completely unscaled.
+---@param recipe table recipe prototype with results and ingredients
+---@param multiplier number multiplier about to be applied
+---@return boolean true when scaling this recipe by multiplier would crash recipe setup
+local function recipe_has_unscalable_items(recipe, multiplier)
+    local checkEntries = function(entries, kind)
+        for _, entry in pairs(entries or {}) do
+            if entry.type == "item" then
+                if item_is_non_stackable(findItemPrototypeAnywhere(entry.name)) then
+                    local count = (entry.amount_max or entry.amount or 0) + (entry.extra_count_fraction or 0)
+                    if count * multiplier > 1 then
+                        log("Skipped " .. recipe.name .. ": item " .. kind .. " '" .. tostring(entry.name) ..
+                            "' is not stackable and cannot be scaled by " .. multiplier .. ".")
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+    return checkEntries(recipe.results, "product") or checkEntries(recipe.ingredients, "ingredient")
+end
+
 local function updateRecipeAmounts(itemName, multiplier)
     if not data.raw.recipe[itemName] then
         log("Warning: recipe name '" .. itemName .. "' does not exist.")
@@ -119,6 +181,11 @@ local function updateRecipeAmounts(itemName, multiplier)
     if recipe_is_recycling(itemName) then
         ---@diagnostic disable-next-line: cast-local-type
         multiplier = modSettingsRecyclingMultiplier
+    end
+
+    -- Compat shim: recipes producing/consuming non-stackable items cannot be batched.
+    if multiplier > 1 and recipe_has_unscalable_items(data.raw.recipe[itemName], multiplier) then
+        return
     end
 
     local recipe
@@ -147,7 +214,7 @@ local function updateRecipeAmounts(itemName, multiplier)
                 result.ignored_by_productivity * multiplier
             result.extra_count_fraction = result.extra_count_fraction and result.extra_count_fraction * multiplier
         end
-        data.raw.recipe[itemName].results = newResult
+        recipe.results = newResult
     end
 
     --- Change recipe ingredients
@@ -156,7 +223,7 @@ local function updateRecipeAmounts(itemName, multiplier)
         for _, ingredient in pairs(newIngredients) do
             ingredient.amount = math.min(MAX_INGREDIENT_AMOUNT, ingredient.amount * multiplier)
         end
-        data.raw.recipe[itemName].ingredients = newIngredients
+        recipe.ingredients = newIngredients
     end
 
     --- Change crafting speed
@@ -210,9 +277,6 @@ if settings.startup["re-enable-type"].value then
                         if result.type == "item" and not data.raw.item[result.name] then
                             local foundGroupsForItem = findItemByName(result.name)
 
-                            if recipe.name == "tree-killer-recycling" then
-                                error(serpent.block(result.name) .. serpent.block(foundGroupsForItem))
-                            end
                             if foundGroupsForItem then
                                 for _, foundGroupName in pairs(foundGroupsForItem) do
                                     if not processItemFlags(data.raw[foundGroupName][result.name]) then
@@ -249,6 +313,16 @@ end
 if settings.startup["re-enable-name"].value then
     for itemName, multiplier in pairs(modSettingsItemNames) do
         updateRecipeAmounts(itemName, multiplier)
+    end
+end
+
+if settings.startup["re-enable-subgroup"].value then
+    local namesEnabled = settings.startup["re-enable-name"].value
+    for recipeName, recipe in pairs(data.raw.recipe) do
+        local multiplier = recipe.subgroup and modSettingsSubGroups[recipe.subgroup]
+        if multiplier and not (namesEnabled and modSettingsItemNames[recipeName]) then
+            updateRecipeAmounts(recipeName, multiplier)
+        end
     end
 end
 

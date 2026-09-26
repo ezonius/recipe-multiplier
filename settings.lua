@@ -50,6 +50,21 @@ data:extend({
     },
     {
         type = "bool-setting",
+        name = "re-enable-subgroup",
+        order = "ak",
+        setting_type = "startup",
+        default_value = false,
+    },
+    {
+        type = "string-setting",
+        name = "re-sub-groups",
+        order = "al",
+        setting_type = "startup",
+        default_value = "",
+        allow_blank = true
+    },
+    {
+        type = "bool-setting",
         name = "re-enable-add-recipe",
         order = "ai",
         setting_type = "startup",

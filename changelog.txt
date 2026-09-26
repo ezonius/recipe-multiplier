@@ -1,4 +1,24 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.0.2
+Date: 26. 09. 2026
+  Features:
+    - New setting "Apply multiplier to Recipe sub groups": target recipes by their sub group id
+      (e.g. "crafting", "smelting", "chemistry"), with optional per-group multipliers
+      ("smelting=20, chemistry"), working the same way as the Item types and Item names settings.
+-------------------------------------------------------------------------------------------------
+Version: 1.0.1
+Date: 25. 09. 2026
+  Bugfixes:
+    - Fixed crash on load: "Recipe item-product X is not stackable but has a max count of N".
+      Recipes whose products or ingredients are non-stackable items (stack_size of 1 or the
+      "not-stackable" flag, e.g. selection tools like tile-upgrade-planner) are now detected and
+      left unscaled instead of being multiplied, since they cannot be batched.
+    - Fixed "Add scaled recipe copies" mode: scaled ingredients/products were written to the
+      original recipe while the crafting time was scaled on the copy; both are now scaled on the
+      copy, leaving the original recipe untouched.
+    - Removed a leftover debug error() call that crashed loading when a "tree-killer-recycling"
+      recipe was present.
+-------------------------------------------------------------------------------------------------
 Version: 1.0.0
 Date: 08. 12. 2024
   Changes:
