@@ -72,6 +72,14 @@ data:extend({
         default_value = true,
     },
     {
+        type = "string-setting",
+        name = "re-probability-handling",
+        order = "bd",
+        setting_type = "startup",
+        default_value = "scaled-amount",
+        allowed_values = {"scaled-amount", "expected-value"},
+    },
+    {
         type = "bool-setting",
         name = "re-enable-add-recipe",
         order = "ba",

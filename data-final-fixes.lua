@@ -48,6 +48,10 @@ local modSettingsEnableType = settings.startup["re-enable-type"].value
 local modSettingsEnableName = settings.startup["re-enable-name"].value
 local modSettingsEnableSubgroup = settings.startup["re-enable-subgroup"].value
 local modSettingsScaleMixedNonStackable = not not settings.startup["re-scale-mixed-nonstackable"].value
+--- "scaled-amount": keep the chance, multiply the output amount (30% of 1 × 11 → 30% of 11).
+--- "expected-value": split into a guaranteed part and a remainder chance
+--- (30% of 1 × 11 → 3 guaranteed + 30% chance of 1).
+local modSettingsProbabilityHandling = settings.startup["re-probability-handling"].value or "scaled-amount"
 
 -- ---------------------------------------------------------------------------
 -- Startup log broadcast (shown in-game after loading a map; see control.lua)
@@ -58,12 +62,30 @@ local modSettingsScaleMixedNonStackable = not not settings.startup["re-scale-mix
 --- after a game is loaded — data-stage `log()` output is otherwise only visible in
 --- factorio-current.log.
 local startupLogMessages = {}
+--- Number of notable messages dropped because the broadcast queue is full. Localised
+--- strings are limited to 20 parameters, so the queue cannot grow unbounded (heavily
+--- modded games can produce thousands of skip messages).
+local startupLogDropped = 0
 
---- Logs a notable message and queues it for the in-game startup broadcast.
+--- Logs a notable message and queues it for the in-game startup broadcast. Only
+--- user-facing problems belong here: strings the user typed that could not be
+--- parsed or do not resolve to anything, and hard errors. Internal per-recipe
+--- notes (skips, invalid modded entries) only go to factorio-current.log via
+--- `note()`, so the in-game broadcast stays short and relevant.
 ---@param message string single-line message (newlines would break the per-line broadcast)
 local function report(message)
 	log(message)
-	table.insert(startupLogMessages, message)
+	if #startupLogMessages < 15 then
+		table.insert(startupLogMessages, message)
+	else
+		startupLogDropped = startupLogDropped + 1
+	end
+end
+
+--- Logs an internal note to factorio-current.log only — never broadcast in-game.
+---@param message string single-line message
+local function note(message)
+	log(message)
 end
 
 -- ---------------------------------------------------------------------------
@@ -317,30 +339,76 @@ local function isRecyclingRecipe(recipeName)
 	return false
 end
 
+--- Scales the count fields of one product/ingredient entry by `multiplier`, respecting
+--- `MAX_AMOUNT`. The stat-related fields (`ignored_by_*`) are scaled too so the
+--- per-craft statistics stay proportional.
+---@param entry table product or ingredient entry
+---@param multiplier number
+local function scaleEntryCounts(entry, multiplier)
+	entry.amount = entry.amount and math.min(MAX_AMOUNT, entry.amount * multiplier)
+	entry.amount_min = entry.amount_min and math.min(MAX_AMOUNT, entry.amount_min * multiplier)
+	entry.amount_max = entry.amount_max and math.min(MAX_AMOUNT, entry.amount_max * multiplier)
+	entry.ignored_by_stats = entry.ignored_by_stats and entry.ignored_by_stats * multiplier
+	entry.ignored_by_productivity = entry.ignored_by_productivity and entry.ignored_by_productivity * multiplier
+	entry.extra_count_fraction = entry.extra_count_fraction and entry.extra_count_fraction * multiplier
+end
+
 --- Scales the amounts of one recipe result list by `multiplier`, respecting
---- `MAX_AMOUNT`. Products may use min/max ranges and fractional counts; all of the
---- count-related fields are scaled, the stat-related ones (`ignored_by_*`) too so
---- the per-craft statistics stay proportional.
+--- `MAX_AMOUNT`. Products may use min/max ranges and fractional counts.
+---
+--- Chance-based products (`probability` < 1) are handled according to the
+--- "re-probability-handling" setting:
+--- * "scaled-amount" (default): the chance stays the same, the output amount is
+---   multiplied (30% chance of 1 × 11 → 30% chance of 11).
+--- * "expected-value": the entry is split so the expected output stays proportional
+---   (30% chance of 1 × 11 → guaranteed 3 + 30% chance of 1 extra). The whole
+---   probability (or independent_probability) × multiplier is converted: the integer part becomes a guaranteed
+---   (probability-free) entry, the fractional part stays as the chance for one
+---   original-sized output.
 ---@param results table[]? deep copy of the recipe's results
 ---@param multiplier number
 local function scaleRecipeResults(results, multiplier)
-	for _, result in pairs(results or {}) do
+	results = results or {}
+	-- Iterate backwards so guaranteed entries inserted at `i + 1` are not visited twice.
+	for i = #results, 1, -1 do
+		local result = results[i]
 		-- With the mixed-products toggle on, non-stackable item products keep their
 		-- original count (max count 1 stays legal). With it off, the whole recipe was
 		-- already skipped by `recipeHasUnscalableItems` before this point, so every
 		-- remaining product can be scaled safely.
 		local isNonStackableProduct = modSettingsScaleMixedNonStackable and result.type == "item" and
 			isNonStackable(findItemPrototypeAnywhere(result.name))
-		if not isNonStackableProduct then
-			result.amount = result.amount and math.min(MAX_AMOUNT, result.amount * multiplier)
-			result.amount_min = result.amount_min and math.min(MAX_AMOUNT, result.amount_min * multiplier)
-			result.amount_max = result.amount_max and math.min(MAX_AMOUNT, result.amount_max * multiplier)
-			result.ignored_by_stats = result.ignored_by_stats and result.ignored_by_stats * multiplier
-			result.ignored_by_productivity = result.ignored_by_productivity and
-				result.ignored_by_productivity * multiplier
-			result.extra_count_fraction = result.extra_count_fraction and result.extra_count_fraction * multiplier
-		else
+		if isNonStackableProduct then
 			log("Left non-stackable product '" .. result.name .. "' unscaled (stays at max count 1).")
+		elseif modSettingsProbabilityHandling == "expected-value" and
+			((result.probability or 1) < 1 or (result.independent_probability or 1) < 1) then
+			-- Products may declare the chance either as `probability` (roll shared with
+			-- other products via probability/override_probabilities semantics) or as
+			-- `independent_probability` (roll independent of other products, e.g.
+			-- oxide-asteroid-crushing). Both are converted the same way.
+			local probField = result.probability and "probability" or "independent_probability"
+			local scaledProbability = result[probField] * multiplier
+			local guaranteed = math.floor(scaledProbability)
+			local fraction = scaledProbability - guaranteed
+			if guaranteed > 0 then
+				-- The integer part of probability × multiplier becomes a guaranteed output of
+				-- `guaranteed` full (range-scaled) batches, with no probability attached.
+				local guaranteedEntry = util.table.deepcopy(result)
+				guaranteedEntry.probability = nil
+				guaranteedEntry.independent_probability = nil
+				scaleEntryCounts(guaranteedEntry, guaranteed)
+				table.insert(results, i + 1, guaranteedEntry)
+			end
+			if fraction > 0 then
+				-- The fractional part stays as a chance for one original-sized output; its
+				-- count fields are deliberately left unscaled (the expected value of this
+				-- branch is already fraction × original output).
+				result[probField] = fraction
+			else
+				table.remove(results, i)
+			end
+		else
+			scaleEntryCounts(result, multiplier)
 		end
 	end
 end
@@ -360,10 +428,18 @@ end
 --- copy of it is scaled.
 ---@param itemName string internal name of the item whose recipe should be scaled
 ---@param multiplier number multiplier for scaling the recipe
-local function updateRecipeAmounts(itemName, multiplier)
+---@param userInitiated boolean? true when the recipe name came directly from the
+--- "re-item-names" setting — a missing recipe is then a user typo and is broadcast
+--- in-game. Names from other criteria are engine/mod internals and only logged.
+local function updateRecipeAmounts(itemName, multiplier, userInitiated)
 	local original = data.raw.recipe[itemName]
 	if not original then
-		report("Warning: recipe name '" .. itemName .. "' does not exist.")
+		local message = "Warning: recipe name '" .. itemName .. "' does not exist."
+		if userInitiated then
+			report(message)
+		else
+			note(message)
+		end
 		return
 	end
 	local effectiveMultiplier = isRecyclingRecipe(itemName) and modSettingsRecyclingMultiplier or multiplier
@@ -371,14 +447,14 @@ local function updateRecipeAmounts(itemName, multiplier)
 	if effectiveMultiplier > 1 then
 		-- Recipes whose products are ALL non-stackable items can never be batched.
 		if allProductsNonStackable(original) then
-			report("Skipped " .. itemName ..
+			note("Skipped " .. itemName ..
 				": all products are non-stackable items, batch scaling has no effect.")
 			return
 		end
 		-- With the mixed-products toggle off, the conservative rule applies: skip the
 		-- whole recipe when any non-stackable item's scaled count would exceed 1.
 		if not modSettingsScaleMixedNonStackable and recipeHasUnscalableItems(original, effectiveMultiplier) then
-			report("Skipped " .. itemName .. ": contains non-stackable items and cannot be scaled by " ..
+			note("Skipped " .. itemName .. ": contains non-stackable items and cannot be scaled by " ..
 				effectiveMultiplier .. " (enable 'Scale recipes with mixed stackability products' to scale the " ..
 				"stackable parts anyway).")
 			return
@@ -441,7 +517,7 @@ local function collectItemNamesFromTypes()
 				for _, entry in pairs(recipe.ingredients or {}) do
 					---@diagnostic disable-next-line: param-type-mismatch
 					if entry.type == "item" and not isScalableItemPrototype(entry.name) then
-						report("Ingredient " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
+						note("Ingredient " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
 						isValid = false
 						break
 					end
@@ -453,7 +529,7 @@ local function collectItemNamesFromTypes()
 					end
 					---@diagnostic disable-next-line: param-type-mismatch
 					if entry.type == "item" and not isScalableItemPrototype(entry.name) then
-						report("Product " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
+						note("Product " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
 						isValid = false
 						break
 					end
@@ -493,7 +569,7 @@ end
 if modSettingsEnableName then
 	runFailSafe("criterion 2: item names (re-item-names)", function()
 		for itemName, multiplier in pairs(modSettingsItemNames) do
-			updateRecipeAmounts(itemName, multiplier)
+			updateRecipeAmounts(itemName, multiplier, true)
 		end
 	end)
 end
@@ -546,6 +622,10 @@ end
 -- hidden item prototype's localised name: {"", msg1, msg2, ...}. control.lua
 -- broadcasts one message per line after a map is loaded.
 if #startupLogMessages > 0 then
+	if startupLogDropped > 0 then
+		table.insert(startupLogMessages, "... and " .. startupLogDropped ..
+			" more messages, suppressed here — see factorio-current.log for the full list.")
+	end
 	data:extend({
 		{
 			type = "item",
@@ -553,9 +633,8 @@ if #startupLogMessages > 0 then
 			icon = "__base__/graphics/icons/iron-plate.png",
 			icon_size = 64,
 			stack_size = 1,
-			-- "hidden" is a valid item flag; the stub's flag union is incomplete.
-			---@diagnostic disable-next-line: assign-type-mismatch
-			flags = { "hidden" },
+			-- In 2.0 "hidden" is a boolean property, not an item flag.
+			hidden = true,
 			-- First element "" makes this a concatenation; every following string is
 			-- one startup message, printed as its own chat line by control.lua.
 			localised_name = { "", table.unpack(startupLogMessages) },

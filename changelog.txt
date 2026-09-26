@@ -1,4 +1,34 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.0.8
+Date: 26. 09. 2026
+  Bugfixes:
+    - "Convert to expected value" mode now also handles products whose chance is declared as
+      `independent_probability` (e.g. oxide-asteroid-crushing: 30% for an extra oxide chunk).
+      Previously those fell through to plain amount multiplication (30% chance of 30 chunks
+      with multiplier 30); they now correctly split into 9 guaranteed + 30% chance of 1 extra.
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.7
+Date: 26. 09. 2026
+  Features:
+    - New setting "Chance-based product handling" with two modes:
+      "Multiply the output amount" (default, previous behaviour): chance stays the same, the output
+      amount is multiplied (30% chance of 1 with multiplier 11 -> 30% chance of 11).
+      "Convert to expected value": the entry is split so the expected output stays exactly
+      proportional (30% chance of 1 with multiplier 11 -> guaranteed 3 + 30% chance of 1 extra).
+  Bugfixes:
+    - Fixed a crash on startup when the in-game startup message broadcast exceeded the engine's
+      limit of 20 localised string parameters (heavily modded games produce thousands of skip
+      messages). The broadcast is now capped at 15 messages and summarizes the remainder, which
+      is always written in full to factorio-current.log.
+---------------------------------------------------------------------------------------------------
+Version: 1.0.6
+Date: 26. 09. 2026
+  Bugfixes:
+    - Added optional dependency on Stack Overload (ezo-stack-overload) so it always runs before this
+      mod in the data stage. Previously the load order between the two mods was undefined, so recipes
+      could be treated as unbatchable based on stack sizes before Stack Overload raised them.
+---------------------------------------------------------------------------------------------------
 Version: 1.0.5
 Date: 26. 09. 2026
   Features:
