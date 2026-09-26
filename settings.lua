@@ -66,6 +66,13 @@ data:extend({
     },
     {
         type = "bool-setting",
+        name = "re-scale-mixed-nonstackable",
+        order = "bc",
+        setting_type = "startup",
+        default_value = true,
+    },
+    {
+        type = "bool-setting",
         name = "re-enable-add-recipe",
         order = "ba",
         setting_type = "startup",

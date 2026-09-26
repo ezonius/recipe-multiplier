@@ -23,14 +23,48 @@ require "util"
 --- Engine hard-limits recipe ingredient/product amounts at this value.
 local MAX_AMOUNT = 65535
 
-local modSettingsRecipeMultiplier = tonumber(settings.startup["re-amount-multiplier"].value)
-local modSettingsRecyclingMultiplier = tonumber(settings.startup["re-recycling-amount-multiplier"].value)
+--- Reads a numeric startup setting and falls back to `fallback` (with a log) when the
+--- value cannot be converted to a number, instead of crashing downstream arithmetic.
+---@param settingName string internal name of the startup setting
+---@param fallback number value to use when the setting is missing or non-numeric
+---@return number
+local function parseNumberSetting(settingName, fallback)
+	local setting = settings.startup[settingName]
+	local value = setting and tonumber(setting.value)
+	if not value then
+		log("Warning: startup setting '" .. settingName .. "' has a non-numeric value ('" ..
+			tostring(setting and setting.value) .. "'); using fallback " .. fallback .. ".")
+		return fallback
+	end
+	return value
+end
+
+local modSettingsRecipeMultiplier = parseNumberSetting("re-amount-multiplier", 10)
+local modSettingsRecyclingMultiplier = parseNumberSetting("re-recycling-amount-multiplier", 10)
 local modSettingsAddRecipes = not not settings.startup["re-enable-add-recipe"].value
-local modSettingsFluidFlowMultiplier = tonumber(settings.startup["re-fluid-flow-multiplier"].value)
+local modSettingsFluidFlowMultiplier = parseNumberSetting("re-fluid-flow-multiplier", 10)
 
 local modSettingsEnableType = settings.startup["re-enable-type"].value
 local modSettingsEnableName = settings.startup["re-enable-name"].value
 local modSettingsEnableSubgroup = settings.startup["re-enable-subgroup"].value
+local modSettingsScaleMixedNonStackable = not not settings.startup["re-scale-mixed-nonstackable"].value
+
+-- ---------------------------------------------------------------------------
+-- Startup log broadcast (shown in-game after loading a map; see control.lua)
+-- ---------------------------------------------------------------------------
+
+--- Notable startup messages (warnings, skips, errors). These are embedded into a
+--- hidden item prototype's localised name so the control stage can broadcast them
+--- after a game is loaded — data-stage `log()` output is otherwise only visible in
+--- factorio-current.log.
+local startupLogMessages = {}
+
+--- Logs a notable message and queues it for the in-game startup broadcast.
+---@param message string single-line message (newlines would break the per-line broadcast)
+local function report(message)
+	log(message)
+	table.insert(startupLogMessages, message)
+end
 
 -- ---------------------------------------------------------------------------
 -- Parsing of the "name, name2=multiplier, ..." style settings
@@ -38,15 +72,31 @@ local modSettingsEnableSubgroup = settings.startup["re-enable-subgroup"].value
 
 --- Parses a setting string of the format `"typeOrName=CustomMultiplier, typeOrName2"` into
 --- a table mapping each `typeOrName` to its multiplier. Entries without an explicit
---- multiplier fall back to the global recipe multiplier.
+--- multiplier fall back to the global recipe multiplier. Entries that fail to parse are
+--- skipped with a log (fail-safe: the remaining, valid entries still take effect) —
+--- data stage code cannot fall back to "the last working setting", but since entries
+--- are independent, dropping only the broken ones preserves everything else.
 ---@param settingString string e.g. `"iron-plate=100, copper-plate"`
+---@param settingName string internal name of the setting, for log messages
 ---@return table<string, number>
-local function parseSettingString(settingString)
+local function parseSettingString(settingString, settingName)
 	local result = {}
+	if type(settingString) ~= "string" then
+		log("Warning: startup setting '" .. settingName .. "' is not a string; ignoring it.")
+		return result
+	end
 	for entry in settingString:gmatch("[^%s,]+") do
-		local typeOrName, numeration = entry:match("([^=]+)=?(.*)")
-		if typeOrName then
-			result[typeOrName] = tonumber(numeration) or modSettingsRecipeMultiplier or 1
+		local ok, typeOrName, numeration = pcall(function()
+			return entry:match("([^=]+)=?(.*)")
+		end)
+		if not ok or not typeOrName or typeOrName == "" then
+			report("Warning: could not parse entry '" .. tostring(entry) .. "' in startup setting '" ..
+				settingName .. "'; skipping it.")
+		elseif numeration ~= "" and tonumber(numeration) == nil then
+			report("Warning: entry '" .. entry .. "' in startup setting '" .. settingName ..
+				"' has a non-numeric multiplier ('" .. numeration .. "'); skipping it.")
+		else
+			result[typeOrName] = (tonumber(numeration) or modSettingsRecipeMultiplier or 1)
 		end
 	end
 	return result
@@ -54,13 +104,25 @@ end
 
 ---@type table<string, number>
 ---@diagnostic disable-next-line: param-type-mismatch
-local modSettingsItemTypes = parseSettingString(settings.startup["re-item-types"].value)
+local modSettingsItemTypes = parseSettingString(settings.startup["re-item-types"].value, "re-item-types")
 ---@type table<string, number>
 ---@diagnostic disable-next-line: param-type-mismatch
-local modSettingsItemNames = parseSettingString(settings.startup["re-item-names"].value)
+local modSettingsItemNames = parseSettingString(settings.startup["re-item-names"].value, "re-item-names")
 ---@type table<string, number>
 ---@diagnostic disable-next-line: param-type-mismatch
-local modSettingsSubGroups = parseSettingString(settings.startup["re-sub-groups"].value)
+local modSettingsSubGroups = parseSettingString(settings.startup["re-sub-groups"].value, "re-sub-groups")
+
+--- Runs one fail-safe block: any error is logged (with the criterion name) instead of
+--- aborting the whole data stage, so a problem in one criterion cannot take down the
+--- other criteria or the rest of the mod.
+---@param criterionName string human-readable name of the criterion, for log messages
+---@param fn function the code to run
+local function runFailSafe(criterionName, fn)
+	local ok, err = pcall(fn)
+	if not ok then
+		report("Error in '" .. criterionName .. "' (startup settings fail-safe, criterion skipped): " .. tostring(err))
+	end
+end
 
 -- ---------------------------------------------------------------------------
 -- Item filtering
@@ -199,29 +261,42 @@ end
 
 --- The engine rejects item products of non-stackable items when their max count
 --- exceeds 1 (e.g. "Recipe item-product X is not stackable but has a max count of N").
---- Such recipes cannot be batched, so they must be left completely unscaled.
+--- Such product entries must stay unscaled, and a recipe whose products are ALL
+--- non-stackable cannot be batched at all (nothing would change except time/input).
+---@param recipe table recipe prototype with results and ingredients
+---@return boolean true when every product of this recipe is a non-stackable item
+local function allProductsNonStackable(recipe)
+	for _, entry in pairs(recipe.results or {}) do
+		-- Non-item products (fluids etc.) and stackable items can all be scaled.
+		if entry.type ~= "item" or not isNonStackable(findItemPrototypeAnywhere(entry.name)) then
+			return false
+		end
+	end
+	return true
+end
+
+--- Conservative pre-check (the default behaviour): the recipe is skipped entirely when
+--- ANY of its products or ingredients is a non-stackable item whose scaled count would
+--- exceed 1 (the engine hard-errors for products in that case).
 ---@param recipe table recipe prototype with results and ingredients
 ---@param multiplier number multiplier about to be applied
 ---@return boolean true when scaling this recipe by `multiplier` would crash recipe setup
 local function recipeHasUnscalableItems(recipe, multiplier)
 	---@param entries table? results or ingredients of the recipe
-	---@param kind string "product" or "ingredient" (for the log message only)
-	local function checkEntries(entries, kind)
+	local function checkEntries(entries)
 		for _, entry in pairs(entries or {}) do
 			if entry.type == "item" and isNonStackable(findItemPrototypeAnywhere(entry.name)) then
 				-- The engine validates max count = amount_max + extra_count_fraction <= 1,
 				-- so scaling is legal when the result lands exactly on 1.
 				local count = (entry.amount_max or entry.amount or 0) + (entry.extra_count_fraction or 0)
 				if count * multiplier > 1 then
-					log("Skipped " .. recipe.name .. ": item " .. kind .. " '" .. tostring(entry.name) ..
-						"' is not stackable and cannot be scaled by " .. multiplier .. ".")
 					return true
 				end
 			end
 		end
 		return false
 	end
-	return checkEntries(recipe.results, "product") or checkEntries(recipe.ingredients, "ingredient")
+	return checkEntries(recipe.results) or checkEntries(recipe.ingredients)
 end
 
 -- ---------------------------------------------------------------------------
@@ -250,13 +325,23 @@ end
 ---@param multiplier number
 local function scaleRecipeResults(results, multiplier)
 	for _, result in pairs(results or {}) do
-		result.amount = result.amount and math.min(MAX_AMOUNT, result.amount * multiplier)
-		result.amount_min = result.amount_min and math.min(MAX_AMOUNT, result.amount_min * multiplier)
-		result.amount_max = result.amount_max and math.min(MAX_AMOUNT, result.amount_max * multiplier)
-		result.ignored_by_stats = result.ignored_by_stats and result.ignored_by_stats * multiplier
-		result.ignored_by_productivity = result.ignored_by_productivity and
-			result.ignored_by_productivity * multiplier
-		result.extra_count_fraction = result.extra_count_fraction and result.extra_count_fraction * multiplier
+		-- With the mixed-products toggle on, non-stackable item products keep their
+		-- original count (max count 1 stays legal). With it off, the whole recipe was
+		-- already skipped by `recipeHasUnscalableItems` before this point, so every
+		-- remaining product can be scaled safely.
+		local isNonStackableProduct = modSettingsScaleMixedNonStackable and result.type == "item" and
+			isNonStackable(findItemPrototypeAnywhere(result.name))
+		if not isNonStackableProduct then
+			result.amount = result.amount and math.min(MAX_AMOUNT, result.amount * multiplier)
+			result.amount_min = result.amount_min and math.min(MAX_AMOUNT, result.amount_min * multiplier)
+			result.amount_max = result.amount_max and math.min(MAX_AMOUNT, result.amount_max * multiplier)
+			result.ignored_by_stats = result.ignored_by_stats and result.ignored_by_stats * multiplier
+			result.ignored_by_productivity = result.ignored_by_productivity and
+				result.ignored_by_productivity * multiplier
+			result.extra_count_fraction = result.extra_count_fraction and result.extra_count_fraction * multiplier
+		else
+			log("Left non-stackable product '" .. result.name .. "' unscaled (stays at max count 1).")
+		end
 	end
 end
 
@@ -278,14 +363,26 @@ end
 local function updateRecipeAmounts(itemName, multiplier)
 	local original = data.raw.recipe[itemName]
 	if not original then
-		log("Warning: recipe name '" .. itemName .. "' does not exist.")
+		report("Warning: recipe name '" .. itemName .. "' does not exist.")
 		return
 	end
 	local effectiveMultiplier = isRecyclingRecipe(itemName) and modSettingsRecyclingMultiplier or multiplier
 
-	-- Compat shim: recipes producing/consuming non-stackable items cannot be batched.
-	if effectiveMultiplier > 1 and recipeHasUnscalableItems(original, effectiveMultiplier) then
-		return
+	if effectiveMultiplier > 1 then
+		-- Recipes whose products are ALL non-stackable items can never be batched.
+		if allProductsNonStackable(original) then
+			report("Skipped " .. itemName ..
+				": all products are non-stackable items, batch scaling has no effect.")
+			return
+		end
+		-- With the mixed-products toggle off, the conservative rule applies: skip the
+		-- whole recipe when any non-stackable item's scaled count would exceed 1.
+		if not modSettingsScaleMixedNonStackable and recipeHasUnscalableItems(original, effectiveMultiplier) then
+			report("Skipped " .. itemName .. ": contains non-stackable items and cannot be scaled by " ..
+				effectiveMultiplier .. " (enable 'Scale recipes with mixed stackability products' to scale the " ..
+				"stackable parts anyway).")
+			return
+		end
 	end
 
 	local recipe
@@ -344,7 +441,7 @@ local function collectItemNamesFromTypes()
 				for _, entry in pairs(recipe.ingredients or {}) do
 					---@diagnostic disable-next-line: param-type-mismatch
 					if entry.type == "item" and not isScalableItemPrototype(entry.name) then
-						log("Ingredient " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
+						report("Ingredient " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
 						isValid = false
 						break
 					end
@@ -356,7 +453,7 @@ local function collectItemNamesFromTypes()
 					end
 					---@diagnostic disable-next-line: param-type-mismatch
 					if entry.type == "item" and not isScalableItemPrototype(entry.name) then
-						log("Product " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
+						report("Product " .. entry.name .. " of recipe " .. recipeName .. " is invalid")
 						isValid = false
 						break
 					end
@@ -372,19 +469,21 @@ local function collectItemNamesFromTypes()
 				end
 			end
 		else
-			log("Warning: item type '" .. itemTypeName .. "' does not exist.")
+			report("Warning: item type '" .. itemTypeName .. "' does not exist.")
 		end
 	end
 	return itemNames
 end
 
 if modSettingsEnableType then
-	local itemNamesFromTypes = collectItemNamesFromTypes()
-	for itemName, multiplier in pairs(itemNamesFromTypes) do
-		if not modSettingsItemNames[itemName] then
-			updateRecipeAmounts(itemName, multiplier)
+	runFailSafe("criterion 1: item types (re-item-types)", function()
+		local itemNamesFromTypes = collectItemNamesFromTypes()
+		for itemName, multiplier in pairs(itemNamesFromTypes) do
+			if not modSettingsItemNames[itemName] then
+				updateRecipeAmounts(itemName, multiplier)
+			end
 		end
-	end
+	end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -392,9 +491,11 @@ end
 -- ---------------------------------------------------------------------------
 
 if modSettingsEnableName then
-	for itemName, multiplier in pairs(modSettingsItemNames) do
-		updateRecipeAmounts(itemName, multiplier)
-	end
+	runFailSafe("criterion 2: item names (re-item-names)", function()
+		for itemName, multiplier in pairs(modSettingsItemNames) do
+			updateRecipeAmounts(itemName, multiplier)
+		end
+	end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -402,13 +503,15 @@ end
 -- ---------------------------------------------------------------------------
 
 if modSettingsEnableSubgroup then
-	for recipeName, recipe in pairs(data.raw.recipe) do
-		local multiplier = recipe.subgroup and modSettingsSubGroups[recipe.subgroup]
-		-- Explicitly named recipes keep their name-based multiplier (or stay unscaled).
-		if multiplier and not (modSettingsEnableName and modSettingsItemNames[recipeName]) then
-			updateRecipeAmounts(recipeName, multiplier)
+	runFailSafe("criterion 3: subgroups (re-sub-groups)", function()
+		for recipeName, recipe in pairs(data.raw.recipe) do
+			local multiplier = recipe.subgroup and modSettingsSubGroups[recipe.subgroup]
+			-- Explicitly named recipes keep their name-based multiplier (or stay unscaled).
+			if multiplier and not (modSettingsEnableName and modSettingsItemNames[recipeName]) then
+				updateRecipeAmounts(recipeName, multiplier)
+			end
 		end
-	end
+	end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -432,4 +535,30 @@ end
 local cargoPod = data.raw["cargo-pod"]["cargo-pod"]
 if cargoPod then
 	cargoPod.inventory_size = cargoPod.inventory_size * 100
+end
+
+-- ---------------------------------------------------------------------------
+-- Startup log carrier prototype
+-- ---------------------------------------------------------------------------
+
+-- The control stage cannot read factorio-current.log, so notable startup messages
+-- (warnings, skipped recipes, errors) are smuggled to the runtime stage inside a
+-- hidden item prototype's localised name: {"", msg1, msg2, ...}. control.lua
+-- broadcasts one message per line after a map is loaded.
+if #startupLogMessages > 0 then
+	data:extend({
+		{
+			type = "item",
+			name = "recipe-multiplier-startup-log",
+			icon = "__base__/graphics/icons/iron-plate.png",
+			icon_size = 64,
+			stack_size = 1,
+			-- "hidden" is a valid item flag; the stub's flag union is incomplete.
+			---@diagnostic disable-next-line: assign-type-mismatch
+			flags = { "hidden" },
+			-- First element "" makes this a concatenation; every following string is
+			-- one startup message, printed as its own chat line by control.lua.
+			localised_name = { "", table.unpack(startupLogMessages) },
+		},
+	})
 end

@@ -1,4 +1,35 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.0.5
+Date: 26. 09. 2026
+  Features:
+    - New setting "Scale recipes with mixed stackability products" (default on): when on, recipes
+      producing a mix of stackable and non-stackable items (e.g. oxide-asteroid-crushing) are scaled;
+      non-stackable product entries keep their original count (max 1 per craft). When off, such recipes
+      are skipped entirely (the previous conservative behaviour). Recipes whose products are ALL
+      non-stackable are always skipped.
+    - Notable startup messages (warnings, skipped recipes, errors) are now broadcast in the chat after
+      a map is loaded (data-stage log output is otherwise only visible in factorio-current.log).
+    - New console command /recipe-multiplier-startup-log to re-print those messages on demand.
+---------------------------------------------------------------------------------------------------
+Version: 1.0.4
+Date: 26. 09. 2026
+  Bugfixes:
+    - Recipes with a mix of stackable and non-stackable item products (e.g. oxide-asteroid-crushing:
+      ice + oxide-asteroid-chunk) are now scaled correctly instead of being skipped entirely.
+      Non-stackable product entries keep their original max count of 1, the rest of the recipe is
+      scaled as usual. Only recipes whose products are ALL non-stackable (e.g. asteroid chunk
+      upcycling) are still skipped.
+---------------------------------------------------------------------------------------------------
+Version: 1.0.3
+Date: 26. 09. 2026
+  Changes:
+    - Fail-safe settings handling: malformed entries in the Item types / Item names / Sub groups
+      string settings no longer cause errors. Unparseable entries (or entries with a non-numeric
+      multiplier) are skipped with a log message while the remaining valid entries still apply.
+    - Non-existing items, recipes, types and sub groups in these settings only produce log
+      messages, never errors.
+    - Non-numeric multiplier settings fall back to their default value with a log message.
+---------------------------------------------------------------------------------------------------
 Version: 1.0.2
 Date: 26. 09. 2026
   Features:
