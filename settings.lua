@@ -80,6 +80,15 @@ data:extend({
         allowed_values = {"scaled-amount", "expected-value"},
     },
     {
+        type = "int-setting",
+        name = "re-min-crafting-time",
+        order = "be",
+        setting_type = "startup",
+        default_value = 0,
+        minimum_value = 0,
+        maximum_value = 36000,
+    },
+    {
         type = "bool-setting",
         name = "re-enable-add-recipe",
         order = "ba",

@@ -1,4 +1,44 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.0.12
+Date: 02. 10. 2026
+  Bugfixes:
+    - Recipes whose products use `extra_count_fraction` (engine-generated recycling recipes such as
+      iron-gear-wheel-recycling: 0 plates with a 50% chance of 1 extra) no longer lose their output
+      when scaled: the scaled chance's integer part is now folded into the product counts as
+      guaranteed output and only a fractional remainder stays as the chance.
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.11
+Date: 26. 09. 2026
+  Bugfixes:
+    - Criteria no longer stack: each recipe is now scaled exactly once, using the highest-priority
+      claim. Previously, a recipe matched by both Item types (global multiplier) and Recipe sub
+      groups had both multipliers applied on top of each other (e.g. 10 × 30 = 300), which could
+      overflow recipe counts beyond the engine limit of 65535.
+    - An explicit "subgroup=number" entry now replaces the implicit multiplier of another criterion
+      instead of stacking; an explicit claim always wins over implicit ones, and implicit claims
+      keep the old criterion priority (Item types → Item names → Sub groups).
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.10
+Date: 26. 09. 2026
+  Features:
+    - Sub group entries in "Recipe sub groups" that match no item subgroup and no recipe's subgroup
+      now produce a warning in the startup log (and the in-game startup broadcast), pointing out
+      that this setting matches sub groups — explicit per-name multipliers belong in "Item/Recipe names".
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.9
+Date: 26. 09. 2026
+  Features:
+    - New startup setting "Minimum crafting time" (default 0 = off): recipes targeted by the Item
+      type / Item name / Sub group criteria are scaled with an integer multiplier of at least
+      ceil(minimum / crafting time), so no batch finishes faster than the configured duration.
+      Example: a 3.2 s recipe with a 30 s minimum is scaled by ceil(30 / 3.2) = 10 → 32 s batch.
+      When the configured multiplier already reaches the minimum, the bigger of the two is used;
+      recipes with an explicit "name=number" multiplier are exempt.
+
+---------------------------------------------------------------------------------------------------
 Version: 1.0.8
 Date: 26. 09. 2026
   Bugfixes:

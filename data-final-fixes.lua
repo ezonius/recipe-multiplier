@@ -52,6 +52,10 @@ local modSettingsScaleMixedNonStackable = not not settings.startup["re-scale-mix
 --- "expected-value": split into a guaranteed part and a remainder chance
 --- (30% of 1 × 11 → 3 guaranteed + 30% chance of 1).
 local modSettingsProbabilityHandling = settings.startup["re-probability-handling"].value or "scaled-amount"
+--- Minimum crafting time in seconds: recipes without an explicit per-name multiplier
+--- ("iron-plate=100") are scaled by at least ceil(minTime / craftTime) so no batch
+--- finishes faster than this. 0 disables the feature.
+local modSettingsMinCraftingTime = parseNumberSetting("re-min-crafting-time", 0)
 
 -- ---------------------------------------------------------------------------
 -- Startup log broadcast (shown in-game after loading a map; see control.lua)
@@ -100,9 +104,11 @@ end
 --- are independent, dropping only the broken ones preserves everything else.
 ---@param settingString string e.g. `"iron-plate=100, copper-plate"`
 ---@param settingName string internal name of the setting, for log messages
----@return table<string, number>
+---@return table<string, number> itemNames
+---@return table<string, boolean> explicitNames set of names that had an explicit "=number"
 local function parseSettingString(settingString, settingName)
 	local result = {}
+	local explicit = {}
 	if type(settingString) ~= "string" then
 		log("Warning: startup setting '" .. settingName .. "' is not a string; ignoring it.")
 		return result
@@ -118,21 +124,29 @@ local function parseSettingString(settingString, settingName)
 			report("Warning: entry '" .. entry .. "' in startup setting '" .. settingName ..
 				"' has a non-numeric multiplier ('" .. numeration .. "'); skipping it.")
 		else
-			result[typeOrName] = (tonumber(numeration) or modSettingsRecipeMultiplier or 1)
+			local multiplier = tonumber(numeration)
+			if multiplier then
+				result[typeOrName] = multiplier
+				explicit[typeOrName] = true
+			else
+				result[typeOrName] = modSettingsRecipeMultiplier or 1
+			end
 		end
 	end
-	return result
+	return result, explicit
 end
 
+---@diagnostic disable-next-line: param-type-mismatch
+local modSettingsItemTypes, modSettingsItemTypeExplicit = parseSettingString(
+	settings.startup["re-item-types"].value, "re-item-types")
 ---@type table<string, number>
 ---@diagnostic disable-next-line: param-type-mismatch
-local modSettingsItemTypes = parseSettingString(settings.startup["re-item-types"].value, "re-item-types")
+local modSettingsItemNames, modSettingsItemNameExplicit = parseSettingString(
+	settings.startup["re-item-names"].value, "re-item-names")
 ---@type table<string, number>
 ---@diagnostic disable-next-line: param-type-mismatch
-local modSettingsItemNames = parseSettingString(settings.startup["re-item-names"].value, "re-item-names")
----@type table<string, number>
----@diagnostic disable-next-line: param-type-mismatch
-local modSettingsSubGroups = parseSettingString(settings.startup["re-sub-groups"].value, "re-sub-groups")
+local modSettingsSubGroups, modSettingsSubGroupExplicit = parseSettingString(
+	settings.startup["re-sub-groups"].value, "re-sub-groups")
 
 --- Runs one fail-safe block: any error is logged (with the criterion name) instead of
 --- aborting the whole data stage, so a problem in one criterion cannot take down the
@@ -342,6 +356,10 @@ end
 --- Scales the count fields of one product/ingredient entry by `multiplier`, respecting
 --- `MAX_AMOUNT`. The stat-related fields (`ignored_by_*`) are scaled too so the
 --- per-craft statistics stay proportional.
+--- `extra_count_fraction` (per-craft chance of one additional product, must stay <= 1)
+--- is split like the expected-value probability handling: after scaling by `multiplier`,
+--- its integer part becomes guaranteed extra products folded into the count fields and
+--- only the fractional remainder stays as the chance.
 ---@param entry table product or ingredient entry
 ---@param multiplier number
 local function scaleEntryCounts(entry, multiplier)
@@ -350,7 +368,19 @@ local function scaleEntryCounts(entry, multiplier)
 	entry.amount_max = entry.amount_max and math.min(MAX_AMOUNT, entry.amount_max * multiplier)
 	entry.ignored_by_stats = entry.ignored_by_stats and entry.ignored_by_stats * multiplier
 	entry.ignored_by_productivity = entry.ignored_by_productivity and entry.ignored_by_productivity * multiplier
-	entry.extra_count_fraction = entry.extra_count_fraction and entry.extra_count_fraction * multiplier
+	local extraCountFraction = entry.extra_count_fraction
+	if extraCountFraction and extraCountFraction > 0 then
+		-- Split the scaled chance: the integer part becomes guaranteed extra products
+		-- (folded into the already-scaled counts), the fraction stays as the chance.
+		local guaranteedExtra = math.floor(extraCountFraction * multiplier)
+		local remainder = extraCountFraction * multiplier - guaranteedExtra
+		entry.extra_count_fraction = remainder > 0 and remainder or nil
+		if guaranteedExtra > 0 then
+			entry.amount = entry.amount and math.min(MAX_AMOUNT, entry.amount + guaranteedExtra)
+			entry.amount_min = entry.amount_min and math.min(MAX_AMOUNT, entry.amount_min + guaranteedExtra)
+			entry.amount_max = entry.amount_max and math.min(MAX_AMOUNT, entry.amount_max + guaranteedExtra)
+		end
+	end
 end
 
 --- Scales the amounts of one recipe result list by `multiplier`, respecting
@@ -431,7 +461,9 @@ end
 ---@param userInitiated boolean? true when the recipe name came directly from the
 --- "re-item-names" setting — a missing recipe is then a user typo and is broadcast
 --- in-game. Names from other criteria are engine/mod internals and only logged.
-local function updateRecipeAmounts(itemName, multiplier, userInitiated)
+---@param explicitMultiplier boolean? true when the multiplier came from an explicit
+--- "name=number" entry; such recipes are exempt from the crafting-time minimum.
+local function updateRecipeAmounts(itemName, multiplier, userInitiated, explicitMultiplier)
 	local original = data.raw.recipe[itemName]
 	if not original then
 		local message = "Warning: recipe name '" .. itemName .. "' does not exist."
@@ -443,6 +475,19 @@ local function updateRecipeAmounts(itemName, multiplier, userInitiated)
 		return
 	end
 	local effectiveMultiplier = isRecyclingRecipe(itemName) and modSettingsRecyclingMultiplier or multiplier
+
+	-- Crafting-time minimum: recipes without an explicit "name=number" multiplier are
+	-- scaled by at least ceil(minTime / craftTime), so no batch is faster than the
+	-- configured minimum duration. Only integer multipliers are used.
+	if modSettingsMinCraftingTime > 0 and not explicitMultiplier then
+		local craftTime = original.energy_required or 0.5
+		local timeMultiplier = math.ceil(modSettingsMinCraftingTime / craftTime)
+		effectiveMultiplier = math.max(effectiveMultiplier, timeMultiplier)
+		if timeMultiplier > 1 then
+			note("Crafting-time minimum raised " .. itemName .. " to multiplier " .. effectiveMultiplier ..
+				" (crafting time " .. craftTime .. "s, minimum " .. modSettingsMinCraftingTime .. "s).")
+		end
+	end
 
 	if effectiveMultiplier > 1 then
 		-- Recipes whose products are ALL non-stackable items can never be batched.
@@ -506,9 +551,12 @@ end
 --- prototypes that do not resolve to plain items are validated first (they may be
 --- item-like entries from other groups) and skipped when invalid.
 ---@return table<string, number> itemNames
+---@return table<string, boolean> explicitNames names whose group had an explicit "=number" multiplier
 local function collectItemNamesFromTypes()
 	local itemNames = {}
+	local explicitNames = {}
 	for itemTypeName, multiplier in pairs(modSettingsItemTypes) do
+		local isExplicit = not not modSettingsItemTypeExplicit[itemTypeName]
 		if itemTypeName == "recipe" then
 			-- Scaling the "recipe" group means scaling the recipes named like the recipe
 			-- itself, but only when all of their items resolve to scalable prototypes.
@@ -536,28 +584,62 @@ local function collectItemNamesFromTypes()
 				end
 				if isValid then
 					itemNames[recipeName] = multiplier
+					explicitNames[recipeName] = isExplicit
 				end
 			end
 		elseif data.raw[itemTypeName] then
 			for itemName, item in pairs(data.raw[itemTypeName]) do
 				if isScalableItem(item) then
 					itemNames[itemName] = multiplier
+					explicitNames[itemName] = isExplicit
 				end
 			end
 		else
 			report("Warning: item type '" .. itemTypeName .. "' does not exist.")
 		end
 	end
-	return itemNames
+	return itemNames, explicitNames
 end
+
+-- ---------------------------------------------------------------------------
+-- Claim resolution: each criterion adds claims (recipeName → multiplier) and an
+-- explicit claim always replaces an implicit one instead of stacking on top of
+-- it. After all criteria have run, every recipe is scaled exactly once with the
+-- winning claim, so multipliers from different criteria can never multiply up.
+-- ---------------------------------------------------------------------------
+--- A claim on one recipe: which multiplier to use and how it was specified.
+---@class Claim
+---@field multiplier number
+---@field explicit boolean true when the multiplier came from an explicit "name=number" entry
+---@field userInitiated boolean? true when the name came directly from a user setting
+
+--- Merges a claim into `claims`, applying the precedence rules:
+--- * an explicit claim ("=number") replaces any existing implicit claim,
+--- * an implicit claim never replaces an existing explicit one,
+--- * two implicit claims keep the existing one (criterion priority: types → names → subgroups).
+---@param claims table<string, Claim>
+---@param recipeName string
+---@param multiplier number
+---@param explicit boolean
+---@param userInitiated boolean?
+local function addClaim(claims, recipeName, multiplier, explicit, userInitiated)
+	local existing = claims[recipeName]
+	if existing then
+		if existing.explicit or not explicit then
+			return
+		end
+		userInitiated = existing.userInitiated or userInitiated
+	end
+	claims[recipeName] = { multiplier = multiplier, explicit = explicit, userInitiated = userInitiated }
+end
+
+local claims = {}
 
 if modSettingsEnableType then
 	runFailSafe("criterion 1: item types (re-item-types)", function()
-		local itemNamesFromTypes = collectItemNamesFromTypes()
+		local itemNamesFromTypes, explicitNamesFromTypes = collectItemNamesFromTypes()
 		for itemName, multiplier in pairs(itemNamesFromTypes) do
-			if not modSettingsItemNames[itemName] then
-				updateRecipeAmounts(itemName, multiplier)
-			end
+			addClaim(claims, itemName, multiplier, explicitNamesFromTypes[itemName])
 		end
 	end)
 end
@@ -569,7 +651,7 @@ end
 if modSettingsEnableName then
 	runFailSafe("criterion 2: item names (re-item-names)", function()
 		for itemName, multiplier in pairs(modSettingsItemNames) do
-			updateRecipeAmounts(itemName, multiplier, true)
+			addClaim(claims, itemName, multiplier, modSettingsItemNameExplicit[itemName], true)
 		end
 	end)
 end
@@ -580,13 +662,42 @@ end
 
 if modSettingsEnableSubgroup then
 	runFailSafe("criterion 3: subgroups (re-sub-groups)", function()
-		for recipeName, recipe in pairs(data.raw.recipe) do
-			local multiplier = recipe.subgroup and modSettingsSubGroups[recipe.subgroup]
-			-- Explicitly named recipes keep their name-based multiplier (or stay unscaled).
-			if multiplier and not (modSettingsEnableName and modSettingsItemNames[recipeName]) then
-				updateRecipeAmounts(recipeName, multiplier)
+		-- Valid subgroups are item-subgroup prototypes; recipes may also reference subgroups
+		-- from other item-subgroup sets. Anything not matching a single recipe's subgroup is
+		-- reported as a likely typo (e.g. an item/recipe name entered in the wrong setting).
+		local knownSubgroups = {}
+		for name in pairs(data.raw["item-subgroup"] or {}) do
+			knownSubgroups[name] = true
+		end
+		for _, recipe in pairs(data.raw.recipe) do
+			if recipe.subgroup then
+				knownSubgroups[recipe.subgroup] = true
 			end
 		end
+		for subgroupName in pairs(modSettingsSubGroups) do
+			if not knownSubgroups[subgroupName] then
+				report("Warning: sub group '" .. subgroupName ..
+					"' in setting 're-sub-groups' does not exist (no item subgroup and no recipe uses it). " ..
+					"Note: this setting matches sub groups, not item/recipe names — explicit per-name " ..
+					"multipliers like 'empty-steel-barrel=30' belong in the 're-item-names' setting.")
+			end
+		end
+		for recipeName, recipe in pairs(data.raw.recipe) do
+			local multiplier = recipe.subgroup and modSettingsSubGroups[recipe.subgroup]
+			if multiplier then
+				-- An explicit subgroup multiplier ("empty-steel-barrel=30") replaces an implicit
+				-- claim from another criterion (e.g. the type criterion's global multiplier) instead
+				-- of being applied on top of it. Explicitly named recipes keep theirs.
+				addClaim(claims, recipeName, multiplier, modSettingsSubGroupExplicit[recipe.subgroup])
+			end
+		end
+	end)
+end
+
+-- Apply exactly one scale pass per recipe, with the winning claim.
+for recipeName, claim in pairs(claims) do
+	runFailSafe("scaling " .. recipeName, function()
+		updateRecipeAmounts(recipeName, claim.multiplier, claim.userInitiated, claim.explicit)
 	end)
 end
 
