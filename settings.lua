@@ -9,13 +9,11 @@ data:extend({
         maximum_value = 1000,
     },
     {
-        type = "int-setting",
-        name = "re-recycling-amount-multiplier",
-        order = "ac",
+        type = "bool-setting",
+        name = "re-recycling-inherit-source",
+        order = "ad",
         setting_type = "startup",
-        default_value = 10,
-        minimum_value = 1,
-        maximum_value = 1000,
+        default_value = true,
     },
     {
         type = "bool-setting",
@@ -87,6 +85,13 @@ data:extend({
         default_value = 0,
         minimum_value = 0,
         maximum_value = 36000,
+    },
+    {
+        type = "bool-setting",
+        name = "re-min-crafting-time-category-explicit",
+        order = "bf",
+        setting_type = "startup",
+        default_value = true,
     },
     {
         type = "bool-setting",

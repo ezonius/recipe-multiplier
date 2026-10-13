@@ -3,8 +3,10 @@
 --- Scales recipe results/ingredients (and crafting time) so that one craft yields
 --- `multiplier` times as much. Which recipes get scaled is controlled by three
 --- independent criteria (each toggleable via startup settings):
----   1. "type"      — every prototype of a given data.raw group (e.g. all `item`s),
+--- 1. "type"      — every prototype of a given data.raw group (e.g. all `item`s),
 ---                    matching by the group name or `type=multiplier` in the setting string.
+---                    Entries naming a recipe-category prototype instead (e.g. "recycling")
+---                    claim every recipe whose `categories` include that category.
 ---   2. "name"      — specific item names, optionally with per-name multipliers.
 ---   3. "subgroup"  — recipes whose `subgroup` matches a name in the subgroup setting.
 --- A recipe matched by several criteria is scaled once, by the first criterion that
@@ -40,7 +42,7 @@ local function parseNumberSetting(settingName, fallback)
 end
 
 local modSettingsRecipeMultiplier = parseNumberSetting("re-amount-multiplier", 10)
-local modSettingsRecyclingMultiplier = parseNumberSetting("re-recycling-amount-multiplier", 10)
+local modSettingsRecyclingInheritSource = not not settings.startup["re-recycling-inherit-source"].value
 local modSettingsAddRecipes = not not settings.startup["re-enable-add-recipe"].value
 local modSettingsFluidFlowMultiplier = parseNumberSetting("re-fluid-flow-multiplier", 10)
 
@@ -55,6 +57,10 @@ local modSettingsProbabilityHandling = settings.startup["re-probability-handling
 --- Minimum crafting time in seconds: recipes without an explicit per-name multiplier
 --- ("iron-plate=100") are scaled by at least ceil(minTime / craftTime) so no batch
 --- finishes faster than this. 0 disables the feature.
+--- When on, recipes claimed explicitly via a recipe-category entry (e.g. "recycling=10")
+--- are NOT exempt from the crafting-time minimum; the time-based minimum can then raise
+--- their effective multiplier above the category's stated value.
+local modSettingsMinTimeAppliesToCategoryExplicit = not not settings.startup["re-min-crafting-time-category-explicit"].value
 local modSettingsMinCraftingTime = parseNumberSetting("re-min-crafting-time", 0)
 
 -- ---------------------------------------------------------------------------
@@ -353,6 +359,28 @@ local function isRecyclingRecipe(recipeName)
 	return false
 end
 
+--- Resolves the multiplier a recycling recipe inherits from its source item, when the
+--- source item was scaled with an explicit "name=number" entry. Engine-generated recycling
+--- recipes are named "<item>-recycling"; as a fallback, the recycled item is looked up as
+--- the recipe's first item result.
+---@param recipeName string internal name of the recycling recipe
+---@param claims table<string, Claim> claim map built from all criteria
+---@return number? sourceMultiplier nil when no explicitly-scaled source item could be found
+local function findRecyclingSourceMultiplier(recipeName, claims)
+	local sourceName = recipeName:match("^(.+)%-recycling$")
+	local sourceClaim = sourceName and claims[sourceName]
+	if not sourceClaim or not sourceClaim.explicit then
+		local recipe = data.raw.recipe[recipeName]
+		for _, entry in pairs(recipe and recipe.results or {}) do
+			if entry.type == "item" and claims[entry.name] and claims[entry.name].explicit then
+				sourceClaim = claims[entry.name]
+				break
+			end
+		end
+	end
+	return sourceClaim and sourceClaim.explicit and sourceClaim.multiplier or nil
+end
+
 --- Scales the count fields of one product/ingredient entry by `multiplier`, respecting
 --- `MAX_AMOUNT`. The stat-related fields (`ignored_by_*`) are scaled too so the
 --- per-craft statistics stay proportional.
@@ -366,8 +394,13 @@ local function scaleEntryCounts(entry, multiplier)
 	entry.amount = entry.amount and math.min(MAX_AMOUNT, entry.amount * multiplier)
 	entry.amount_min = entry.amount_min and math.min(MAX_AMOUNT, entry.amount_min * multiplier)
 	entry.amount_max = entry.amount_max and math.min(MAX_AMOUNT, entry.amount_max * multiplier)
-	entry.ignored_by_stats = entry.ignored_by_stats and entry.ignored_by_stats * multiplier
-	entry.ignored_by_productivity = entry.ignored_by_productivity and entry.ignored_by_productivity * multiplier
+	-- The ignored_by_* values are engine-side amounts too and share the same 65535 limit
+	-- (they scale proportionally with the counts, so clamping them together keeps the
+	-- stats ratios intact for huge multipliers).
+	entry.ignored_by_stats = entry.ignored_by_stats and
+		math.min(MAX_AMOUNT, entry.ignored_by_stats * multiplier)
+	entry.ignored_by_productivity = entry.ignored_by_productivity and
+		math.min(MAX_AMOUNT, entry.ignored_by_productivity * multiplier)
 	local extraCountFraction = entry.extra_count_fraction
 	if extraCountFraction and extraCountFraction > 0 then
 		-- Split the scaled chance: the integer part becomes guaranteed extra products
@@ -461,8 +494,9 @@ end
 ---@param userInitiated boolean? true when the recipe name came directly from the
 --- "re-item-names" setting — a missing recipe is then a user typo and is broadcast
 --- in-game. Names from other criteria are engine/mod internals and only logged.
----@param explicitMultiplier boolean? true when the multiplier came from an explicit
---- "name=number" entry; such recipes are exempt from the crafting-time minimum.
+---@param explicitMultiplier boolean? true when the recipe is exempt from the crafting-time
+--- minimum (explicit "name=number" entries, unless overridden by
+--- "re-min-crafting-time-category-explicit" for recipe-category claims)
 local function updateRecipeAmounts(itemName, multiplier, userInitiated, explicitMultiplier)
 	local original = data.raw.recipe[itemName]
 	if not original then
@@ -474,7 +508,7 @@ local function updateRecipeAmounts(itemName, multiplier, userInitiated, explicit
 		end
 		return
 	end
-	local effectiveMultiplier = isRecyclingRecipe(itemName) and modSettingsRecyclingMultiplier or multiplier
+	local effectiveMultiplier = multiplier
 
 	-- Crafting-time minimum: recipes without an explicit "name=number" multiplier are
 	-- scaled by at least ceil(minTime / craftTime), so no batch is faster than the
@@ -550,11 +584,15 @@ end
 --- named `data.raw` group, all scalable prototypes of that group claim their recipes;
 --- prototypes that do not resolve to plain items are validated first (they may be
 --- item-like entries from other groups) and skipped when invalid.
+--- Entries naming a recipe-category prototype (e.g. "recycling") are also tracked so the
+--- crafting-time minimum can optionally apply to their explicit multipliers.
 ---@return table<string, number> itemNames
 ---@return table<string, boolean> explicitNames names whose group had an explicit "=number" multiplier
+---@return table<string, boolean> categoryExplicitNames names explicitly claimed via a recipe-category entry
 local function collectItemNamesFromTypes()
 	local itemNames = {}
 	local explicitNames = {}
+	local categoryExplicitNames = {}
 	for itemTypeName, multiplier in pairs(modSettingsItemTypes) do
 		local isExplicit = not not modSettingsItemTypeExplicit[itemTypeName]
 		if itemTypeName == "recipe" then
@@ -594,11 +632,27 @@ local function collectItemNamesFromTypes()
 					explicitNames[itemName] = isExplicit
 				end
 			end
+		elseif data.raw["recipe-category"][itemTypeName] then
+			-- A recipe-category name (e.g. "recycling" or "macerating") claims every recipe
+			-- whose `categories` list includes it. This is how recycling recipes are targeted
+			-- since the dedicated recycling-multiplier setting was deprecated.
+			for recipeName, recipe in pairs(data.raw.recipe) do
+				for _, category in pairs(recipe.categories or {}) do
+				if category == itemTypeName then
+					itemNames[recipeName] = multiplier
+					explicitNames[recipeName] = isExplicit
+					if isExplicit then
+						categoryExplicitNames[recipeName] = true
+					end
+					break
+					end
+				end
+			end
 		else
 			report("Warning: item type '" .. itemTypeName .. "' does not exist.")
 		end
 	end
-	return itemNames, explicitNames
+	return itemNames, explicitNames, categoryExplicitNames
 end
 
 -- ---------------------------------------------------------------------------
@@ -612,6 +666,7 @@ end
 ---@field multiplier number
 ---@field explicit boolean true when the multiplier came from an explicit "name=number" entry
 ---@field userInitiated boolean? true when the name came directly from a user setting
+---@field fromCategory boolean? true when the claim came from an explicit recipe-category entry (e.g. "recycling=10")
 
 --- Merges a claim into `claims`, applying the precedence rules:
 --- * an explicit claim ("=number") replaces any existing implicit claim,
@@ -637,9 +692,16 @@ local claims = {}
 
 if modSettingsEnableType then
 	runFailSafe("criterion 1: item types (re-item-types)", function()
-		local itemNamesFromTypes, explicitNamesFromTypes = collectItemNamesFromTypes()
+		local itemNamesFromTypes, explicitNamesFromTypes, categoryExplicitFromTypes = collectItemNamesFromTypes()
 		for itemName, multiplier in pairs(itemNamesFromTypes) do
 			addClaim(claims, itemName, multiplier, explicitNamesFromTypes[itemName])
+		end
+		-- Mark claims that came from explicit recipe-category entries so the crafting-time
+		-- minimum can optionally apply to them (see "re-min-crafting-time-category-explicit").
+		for recipeName in pairs(categoryExplicitFromTypes) do
+			if claims[recipeName] then
+				claims[recipeName].fromCategory = true
+			end
 		end
 	end)
 end
@@ -697,7 +759,25 @@ end
 -- Apply exactly one scale pass per recipe, with the winning claim.
 for recipeName, claim in pairs(claims) do
 	runFailSafe("scaling " .. recipeName, function()
-		updateRecipeAmounts(recipeName, claim.multiplier, claim.userInitiated, claim.explicit)
+		local multiplier = claim.multiplier
+		-- Recycling recipes: an explicit claim on the recipe itself wins; otherwise an
+		-- explicitly-scaled source item is inherited (toggleable); otherwise the normal
+		-- implicit claim multiplier is used.
+		if isRecyclingRecipe(recipeName) and not claim.explicit then
+			local sourceMultiplier = modSettingsRecyclingInheritSource and
+				findRecyclingSourceMultiplier(recipeName, claims)
+			if sourceMultiplier then
+				note("Recycling recipe " .. recipeName .. " inherits multiplier " .. sourceMultiplier ..
+					" from its explicitly-scaled source item.")
+				multiplier = sourceMultiplier
+			end
+		end
+		-- An explicit claim on the recipe itself is normally exempt from the time minimum,
+		-- but explicit recipe-category entries (e.g. "recycling=10") can be made subject to
+		-- it via "re-min-crafting-time-category-explicit".
+		local timeMinExempt = claim.explicit and
+			not (modSettingsMinTimeAppliesToCategoryExplicit and claim.fromCategory)
+		updateRecipeAmounts(recipeName, multiplier, claim.userInitiated, timeMinExempt)
 	end)
 end
 

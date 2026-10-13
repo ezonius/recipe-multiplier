@@ -1,4 +1,50 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.0.16
+Date: 11. 10. 2026
+  Changes:
+    - Removed the deprecated, hidden "Recycling amount multiplier" setting. Recycling recipes are
+      now targeted via a "recycling=<multiplier>" entry in "Item types" and/or the "Recycling
+      recipes inherit their source item's multiplier" setting. The old setting's stored value (if
+      any) is simply ignored from now on.
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.15
+Date: 11. 10. 2026
+  Bugfixes:
+    - Fixed "Value (109091) outside of range" crash when loading recipes whose scaled
+      `ignored_by_stats` / `ignored_by_productivity` values exceeded the engine limit of 65535
+      (e.g. dry-ice-recycling with a large multiplier). Those stat values are now clamped to
+      the same limit as the product/ingredient counts.
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.14
+Date: 11. 10. 2026
+  Features:
+    - New startup setting "Apply minimum crafting time to explicit recipe-category entries"
+      (default on): recipes explicitly claimed via a recipe-category entry in "Item types"
+      (e.g. "recycling=10") are no longer exempt from the minimum crafting time — the time-based
+      minimum can raise their effective multiplier above the category's stated value. When off,
+      all explicit "name=number" entries remain fully exempt as before.
+
+---------------------------------------------------------------------------------------------------
+Version: 1.0.13
+Date: 11. 10. 2026
+  Features:
+    - "Item types" entries can now name recipe categories: an entry like "recycling" (optionally
+      "recycling=<multiplier>") scales every recipe whose categories include it. This replaces the
+      dedicated recycling multiplier as the way to target all recycling recipes (the engine gives
+      every recycling recipe the "recycling" category; modded ones may use e.g. "macerating").
+    - New startup setting "Recycling recipes inherit their source item's multiplier" (default on):
+      when a recycling recipe's source item (e.g. "iron-plate" for "iron-plate-recycling") was scaled
+      with an explicit "name=number" entry, the recycling recipe inherits that multiplier.
+  Changes:
+    - The "Recycling amount multiplier" setting is deprecated and now hidden. Existing installs keep
+      their stored value, which still applies when it differs from the default (10) and no explicit
+      claim wins; a fresh install's default no longer forces recycling recipes away from the normal
+      criteria. An explicit claim on the recycling recipe itself (e.g. "recycling=15" or
+      "iron-plate-recycling=20") always wins.
+
+---------------------------------------------------------------------------------------------------
 Version: 1.0.12
 Date: 02. 10. 2026
   Bugfixes:
