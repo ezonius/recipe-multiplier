@@ -6,12 +6,39 @@ on:
       - '*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # Step 1
+      - name: Validate secrets
+        run: |
+          if [[ -z "${{ secrets.FACTORIO_MOD_API_KEY }}" ]]; then
+            echo "Error: Secret 'FACTORIO_MOD_API_KEY' is not set."
+            exit 1
+          fi
+      # Step 2
       - uses: actions/checkout@v4
-      - name: Publish mod
-        uses: Penguin-Spy/factorio-mod-portal-publish@main
+      - name: Validate mod
+        uses: TheBrutalX/factorio-mod-uploader-action@v2
         with:
+          action: validate
+      - name: Create zip
+        uses: TheBrutalX/factorio-mod-uploader-action@v2
+        with:
+          action: compress
+          auto-update-version: 'true'
+      - name: Publish mod
+        uses: TheBrutalX/factorio-mod-uploader-action@v2
+        with:
+          action: upload
           factorio-api-key: ${{ secrets.FACTORIO_MOD_API_KEY }}
+      - name: Attach zip to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ runner.temp }}/*.zip
+          generate_release_notes: true

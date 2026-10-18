@@ -1,0 +1,59 @@
+# mod_info.yml — portal metadata consumed by TheBrutalX/factorio-mod-uploader-action
+# (https://github.com/TheBrutalX/Factorio-mod-uploader-action).
+#
+# Used by two workflow steps:
+#   - "Publish mod" (action: upload): if the mod does not exist on the portal yet,
+#     this file provides the FIRST-PUBLISH metadata (title, category, license...).
+#     For updates of an existing mod it is ignored except...
+#   - "edit_details" call (runs after every publish unless `skip-update-details: true`
+#     is set in the workflow): re-applies title/summary/category/tags/license.
+#
+# This file is NOT part of the published zip (excluded via .factorioignore).
+# Schema source: src/services/FactorioModInfoParser.ts in the action repo.
+#
+# All fields are OPTIONAL. Top-level `version` is only written by the action's
+# `auto-update-version` option; keep it in sync with info.json manually if edited.
+
+version: 1.0.16
+mod_info:
+  # Human-readable mod title shown on the mod portal (max 500 chars).
+  # Keep in sync with info.json `title` — new-mod.nu updates both when generating.
+  title: Recipe Multiplier
+
+  # One-line short description shown in mod lists / search results (1–250 chars).
+  # Uncomment and fill in if you want a summary distinct from info.json description.
+  summary: Batch crafting — multiply recipe ingredients, products and crafting time for more UPS-friendly crafting.
+
+  # Path (relative to repo root) of a markdown file whose contents are used as the
+  # portal's long description. Fail the run if the file is missing.
+  description_file: README.md
+
+  # Mod portal category (single string, case-insensitive). One of:
+  #   no-category | content | overhaul | tweaks | utilities
+  #   scenarios | mod-packs | localizations | internal
+  # Invalid values emit a warning and are skipped (NOT a hard failure).
+  category: tweaks
+
+  # Mod portal tags — YAML list, each one of:
+  #   transportation | logistics | trains | combat | armor | enemies
+  #   environment | mining | fluids | logistic-network | circuit-network
+  #   manufacturing | power | storage | blueprints | cheats
+  # Invalid values emit a warning and are skipped; non-array value fails validation.
+  tags:
+    - manufacturing
+
+  # License shown on the mod portal. Case-insensitive; one of:
+  #   mit            -> default_mit
+  #   gplv3/gnugplv3 -> default_gnugplv3
+  #   lgplv3         -> default_gnulgplv3
+  #   mozilla2       -> default_mozilla2
+  #   apache2        -> default_apache2
+  #   unlicense      -> default_unlicense
+  #   custom_<text>  -> passed through verbatim (custom license text/URL)
+  # Invalid values emit a warning and are skipped; non-string value fails validation.
+  license: mit
+
+  # When true, the action adds the GitHub repository URL (from GITHUB_SERVER_URL /
+  # GITHUB_REPOSITORY) as the mod's source link on the portal. There is no manual
+  # URL field — only this toggle.
+  attach_source_link: true

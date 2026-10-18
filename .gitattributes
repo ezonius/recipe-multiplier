@@ -1,6 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+.factorioignore export-ignore
 .gitattributes export-ignore
 .gitignore export-ignore
 .github export-ignore
-thumbnail.xcf export-ignore
+mod_info.yml export-ignore

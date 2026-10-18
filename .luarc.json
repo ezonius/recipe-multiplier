@@ -1,0 +1,11 @@
+{
+    "diagnostics.globals": [
+        "pipecoverspictures",
+        "make_rotated_animation_variations_from_sheet",
+        "universal_connector_template"
+    ],
+    "diagnostics.disable": ["missing-fields"],
+    "workspace.library": ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\Factorio\\doc-html\\factorio\\library"],
+    "workspace.ignoreDir": [],
+    "runtime.version": "Lua 5.2"
+}

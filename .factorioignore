@@ -1,0 +1,15 @@
+# Files/dirs excluded from the published mod zip
+# (used by TheBrutalX/factorio-mod-uploader-action "compress" step)
+.git/
+.github/
+.idea/
+.junie/
+.gitignore
+.gitattributes
+.lua-format
+.luarc.json
+README.md
+DESCRIPTION.md
+mod_info.yml
+thumbnail.xcf
+*.zip
